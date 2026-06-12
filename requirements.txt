@@ -1,10 +1,7 @@
 flask
 flask-cors
 flask-SocketIO==5.3.5
+gevent
 google-genai
 python-dotenv
 gunicorn
-greenlet>=3.0.0
-gevent>=23.9.1
-gevent-websocket>=0.10.1
-urllib3<2.0
