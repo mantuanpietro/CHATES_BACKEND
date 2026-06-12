@@ -1,21 +1,27 @@
-# IMPORTANTE: Patch do gevent DEVE vir PRIMEIRO, antes de qualquer outra importação
-from gevent import monkey
-monkey.patch_all()
+import sys
 
-from flask import Flask, request, jsonify  # 'session' removido completamente
-from flask_socketio import SocketIO, emit   # Apenas o básico e funcional
+if sys.platform != "win32":
+    try:
+        from gevent import monkey
+        monkey.patch_all()
+    except ImportError:
+        print("Gevent não instalado!")
+
+from flask import Flask, request, jsonify, session
+from flask_socketio import SocketIO, emit 
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
+from uuid import uuid4
 import os
 
 # Carrega as variáveis ocultas do arquivo .env (como a chave da API do Gemini)
 load_dotenv()
 
-# Define qual versão da IA vamos usar. O modelo "flash" é rápido e ideal para chatbots.
+# modelo do gemini
 MODELO = "gemini-3.1-flash-lite"
 
-# Aqui definimos o "Prompt de Sistema". É a personalidade e as regras que o bot deve seguir.
+# Intruções para o modelo 
 instrucoes = """
 Você age como o personagem "chaves", do seriado mexicano de comédia "Chaves".
 Responda às perguntas e interaja com o usuário como se fosse o Chaves, usando expressões e o jeito de falar característicos do personagem. Seja divertido, engraçado e mantém a essência do Chaves em todas as respostas.
@@ -35,30 +41,59 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 # Dicionário que funciona como a "memória temporária" do servidor. 
 active_chats = {}
 
-def get_user_chat(sid):
+def get_user_chat():
     """
-    Função de gerenciamento de usuários baseada no ID único da conexão (request.sid).
-    Isso elimina completamente os bugs de escopo e compatibilidade!
+    Função principal de gerenciamento de usuários.
+    Ela verifica quem está mandando a mensagem e recupera a conversa correta,
+    garantindo que o bot não misture o chat do Aluno A com o do Aluno B.
     """
-    if sid not in active_chats:
-        print(f"Criando novo chat Gemini para o cliente (sid): {sid}")
+    
+    # Passo 1: Se o usuário é novo (não tem um 'session_id'), criamos um ID único para ele.
+    # Usamos o 'uuid4' para gerar um código aleatório impossível de repetir.
+    if 'session_id' not in session:
+        session['session_id'] = str(uuid4())
+        print(f"Nova sessão Flask criada: {session['session_id']}")
+
+    session_id = session['session_id']
+
+    # Passo 2: Se o usuário já tem um ID, mas ainda não tem uma conversa aberta com o Gemini...
+    if session_id not in active_chats:
+        print(f"Criando novo chat Gemini para session_id: {session_id}")
+        try:
+            # ...nós criamos uma nova conversa e passamos as instruções (personalidade).
+            chat_session = client.chats.create(
+                model=MODELO,
+                config=types.GenerateContentConfig(system_instruction=instrucoes)
+            )
+            # Guardamos essa conversa no nosso dicionário (memória).
+            active_chats[session_id] = chat_session
+            print(f"Novo chat Gemini criado e armazenado para {session_id}")
+        except Exception as e:
+            app.logger.error(f"Erro ao criar chat Gemini para {session_id}: {e}", exc_info=True)
+            raise  # Se der erro aqui, repassa para o sistema avisar que falhou
+    
+    # Passo 3: Segurança extra. Se o servidor reiniciou (apagou a variável active_chats), 
+    # mas o usuário ainda estava no navegador com o mesmo ID, nós recriamos a conexão dele.
+    if session_id in active_chats and active_chats[session_id] is None:
+        print(f"Recriando chat Gemini para session_id existente (estava None): {session_id}")
         try:
             chat_session = client.chats.create(
                 model=MODELO,
                 config=types.GenerateContentConfig(system_instruction=instrucoes)
             )
-            active_chats[sid] = chat_session
-            print(f"Novo chat Gemini criado e armazenado para {sid}")
+            active_chats[session_id] = chat_session
         except Exception as e:
-            app.logger.error(f"Erro ao criar chat Gemini para {sid}: {e}", exc_info=True)
-            raise  
-    return active_chats[sid]
+            app.logger.error(f"Erro ao recriar chat Gemini para {session_id}: {e}", exc_info=True)
+            raise
+
+    # Retorna o histórico de mensagens exato daquele usuário.
+    return active_chats[session_id]
 
 # Rota simples para verificar se o servidor está rodando.
 @app.route('/')
 def root():
     return jsonify({
-        "api-websocket": "chatbot",
+        "api-websocket": "chates-chatbot",
         "status": "ok"
     })
 
