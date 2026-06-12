@@ -2,12 +2,11 @@
 from gevent import monkey
 monkey.patch_all()
 
-from flask import Flask, request, jsonify  # Removido o session do Flask completamente
-from flask_socketio import SocketIO, emit, save_session, get_session # Ferramentas nativas do SocketIO
+from flask import Flask, request, jsonify  # Session removido completamente
+from flask_socketio import SocketIO, emit   # Apenas o básico e funcional
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
-from uuid import uuid4
 import os
 
 # Carrega as variáveis ocultas do arquivo .env (como a chave da API do Gemini)
@@ -16,7 +15,7 @@ load_dotenv()
 # Define qual versão da IA vamos usar. O modelo "flash" é rápido e ideal para chatbots.
 MODELO = "gemini-3.1-flash-lite"
 
-# Aqui definimos o "Prompt de Sistema".
+# Aqui definimos o "Prompt de Sistema". É a personalidade e as regras que o bot deve seguir.
 instrucoes = """
 Você age como o personagem "chaves", do seriado mexicano de comédia "Chaves".
 Responda às perguntas e interaja com o usuário como se fosse o Chaves, usando expressões e o jeito de falar característicos do personagem. Seja divertido, engraçado e mantém a essência do Chaves em todas as respostas.
@@ -30,24 +29,30 @@ client = genai.Client(api_key=os.getenv("CHAVE_GEMINI"))
 app = Flask(__name__)
 app.secret_key = "chaves_key"
 
-# Inicializa o SocketIO normal
+# Adiciona a funcionalidade de WebSockets ao nosso app.
 socketio = SocketIO(app, cors_allowed_origins="*")
 
 # Dicionário que funciona como a "memória temporária" do servidor. 
 active_chats = {}
 
-def obter_ou_criar_sessao():
+def get_user_chat(sid):
     """
-    Função auxiliar para ler ou criar o session_id usando os métodos nativos do Flask-SocketIO.
+    Função de gerenciamento de usuários baseada no ID único da conexão (request.sid).
+    Isso elimina completamente os bugs de escopo e compatibilidade!
     """
-    sid = request.sid
-    # Tenta buscar a sessão existente desse cliente específico (sid)
-    with get_session(sid) as s:
-        if 'session_id' not in s:
-            s['session_id'] = str(uuid4())
-            save_session(sid, s)
-            print(f"Nova sessão SocketIO criada para {sid}: {s['session_id']}")
-        return s['session_id']
+    if sid not in active_chats:
+        print(f"Criando novo chat Gemini para o cliente (sid): {sid}")
+        try:
+            chat_session = client.chats.create(
+                model=MODELO,
+                config=types.GenerateContentConfig(system_instruction=instrucoes)
+            )
+            active_chats[sid] = chat_session
+            print(f"Novo chat Gemini criado e armazenado para {sid}")
+        except Exception as e:
+            app.logger.error(f"Erro ao criar chat Gemini para {sid}: {e}", exc_info=True)
+            raise  
+    return active_chats[sid]
 
 # Rota simples para verificar se o servidor está rodando.
 @app.route('/')
@@ -64,54 +69,35 @@ def root():
 
 @socketio.on('connect')
 def handle_connect():
-    print(f"Cliente conectado: {request.sid}")
+    sid = request.sid  # Identificador único da conexão atual
+    print(f"Cliente conectado: {sid}")
     
     try:
-        # Garante a criação do session_id via SocketIO
-        session_id = obter_ou_criar_sessao()
-        print(f"Sessão para {request.sid} usa session_id: {session_id}")
-        
-        # Se ainda não tem chat criado no active_chats para esse ID, cria um novo
-        if session_id not in active_chats:
-            print(f"Criando novo chat Gemini para session_id: {session_id}")
-            chat_session = client.chats.create(
-                model=MODELO,
-                config=types.GenerateContentConfig(system_instruction=instrucoes)
-            )
-            active_chats[session_id] = chat_session
-
-        emit('status_conexao', {'data': 'Conectado com sucesso!', 'session_id': session_id})
+        # Inicializa o chat usando o próprio SID do cliente
+        get_user_chat(sid)
+        emit('status_conexao', {'data': 'Conectado com sucesso!', 'session_id': sid})
     except Exception as e:
-        app.logger.error(f"Erro durante o evento connect para {request.sid}: {e}", exc_info=True)
+        app.logger.error(f"Erro durante o evento connect para {sid}: {e}", exc_info=True)
         emit('erro', {'erro': 'Falha ao inicializar a sessão de chat no servidor.'})
 
 
 @socketio.on('enviar_mensagem')
 def handle_enviar_mensagem(data):
+    sid = request.sid
     try:
         mensagem_usuario = data.get("mensagem")
-        
-        # Recupera o session_id correto de forma segura
-        session_id = obter_ou_criar_sessao()
-        app.logger.info(f"Mensagem recebida de {session_id}: {mensagem_usuario}")
+        app.logger.info(f"Mensagem recebida de {sid}: {mensagem_usuario}")
 
         if not mensagem_usuario:
             emit('erro', {"erro": "Mensagem não pode ser vazia."})
             return
 
-        # Busca o chat correspondente
-        user_chat = active_chats.get(session_id)
-        
-        # Caso o servidor tenha reiniciado e limpado o active_chats, recria o chat aqui
+        user_chat = get_user_chat(sid)
         if user_chat is None:
-            print(f"Recriando chat Gemini perdido para session_id: {session_id}")
-            user_chat = client.chats.create(
-                model=MODELO,
-                config=types.GenerateContentConfig(system_instruction=instrucoes)
-            )
-            active_chats[session_id] = user_chat
+            emit('erro', {"erro": "Sessão de chat não pôde ser estabelecida."})
+            return
 
-        # Comunicação com o Gemini
+        # Comunicação com o Google Gemini
         resposta_gemini = user_chat.send_message(mensagem_usuario)
 
         resposta_texto = (
@@ -120,18 +106,23 @@ def handle_enviar_mensagem(data):
             else resposta_gemini.candidates[0].content.parts[0].text
         )
         
-        emit('nova_mensagem', {"remetente": "bot", "texto": resposta_texto, "session_id": session_id})
-        app.logger.info(f"Resposta enviada para {session_id}: {resposta_texto}")
+        emit('nova_mensagem', {"remetente": "bot", "texto": resposta_texto, "session_id": sid})
+        app.logger.info(f"Resposta enviada para {sid}: {resposta_texto}")
 
     except Exception as e:
-        app.logger.error(f"Erro ao processar 'enviar_mensagem': {e}", exc_info=True)
+        app.logger.error(f"Erro ao processar 'enviar_mensagem' para {sid}: {e}", exc_info=True)
         emit('erro', {"erro": f"Ocorreu um erro no servidor: {str(e)}"})
 
 
 @socketio.on('disconnect')
 def handle_disconnect():
-    session_id = obter_ou_criar_sessao()
-    print(f"Cliente desconectado: {request.sid}, session_id: {session_id}")
+    sid = request.sid
+    print(f"Cliente desconectado: {sid}")
+    
+    # 🧹 Limpeza de memória: Remove o chat do dicionário para liberar RAM no Render
+    if sid in active_chats:
+        del active_chats[sid]
+        print(f"Memória do chat {sid} liberada com sucesso.")
 
 
 if __name__ == "__main__":
