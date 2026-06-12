@@ -2,7 +2,7 @@
 from gevent import monkey
 monkey.patch_all()
 
-from flask import Flask, request, jsonify  # Session removido completamente
+from flask import Flask, request, jsonify  # Removido 'session' completamente
 from flask_socketio import SocketIO, emit   # Apenas o básico e funcional
 from google import genai
 from google.genai import types
@@ -69,7 +69,7 @@ def root():
 
 @socketio.on('connect')
 def handle_connect():
-    sid = request.sid  # Identificador único da conexão atual
+    sid = request.sid  # Identificador único da conexão atual do navegador
     print(f"Cliente conectado: {sid}")
     
     try:
@@ -119,7 +119,8 @@ def handle_disconnect():
     sid = request.sid
     print(f"Cliente desconectado: {sid}")
     
-    # 🧹 Limpeza de memória: Remove o chat do dicionário para liberar RAM no Render
+    # 🧹 Limpeza de memória: Remove o chat do dicionário quando o usuário sai.
+    # Isso evita que o servidor do Render caia por falta de memória RAM (Out of Memory).
     if sid in active_chats:
         del active_chats[sid]
         print(f"Memória do chat {sid} liberada com sucesso.")
