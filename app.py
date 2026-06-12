@@ -104,62 +104,78 @@ def root():
 
 @socketio.on('connect')
 def handle_connect():
-    sid = request.sid  # Identificador único da conexão atual do navegador
-    print(f"Cliente conectado: {sid}")
+    """
+    EVENTO: Disparado no momento exato em que o Front-end (navegador) se conecta ao servidor.
+    """
+    print(f"Cliente conectado: {request.sid}")
     
     try:
-        # Inicializa o chat usando o próprio SID do cliente
-        get_user_chat(sid)
-        emit('status_conexao', {'data': 'Conectado com sucesso!', 'session_id': sid})
+        # Tenta criar a pasta do usuário assim que ele entra
+        get_user_chat()
+        user_session_id = session.get('session_id', 'N/A')
+        print(f"Sessão Flask para {request.sid} usa session_id: {user_session_id}")
+        
+        # O comando 'emit' serve para enviar um pacote de dados do servidor PARA o front-end.
+        emit('status_conexao', {'data': 'Conectado com sucesso!', 'session_id': user_session_id})
     except Exception as e:
-        app.logger.error(f"Erro durante o evento connect para {sid}: {e}", exc_info=True)
+        app.logger.error(f"Erro durante o evento connect para {request.sid}: {e}", exc_info=True)
         emit('erro', {'erro': 'Falha ao inicializar a sessão de chat no servidor.'})
 
 
 @socketio.on('enviar_mensagem')
 def handle_enviar_mensagem(data):
-    sid = request.sid
+    """
+    EVENTO: O Front-end mandou uma mensagem (ex: o usuário clicou em 'Enviar' no chat).
+    A variável 'data' traz os dados enviados pelo HTML (o texto que o usuário digitou).
+    """
     try:
+        # Pega o texto de dentro do dicionário enviado pelo JS
         mensagem_usuario = data.get("mensagem")
-        app.logger.info(f"Mensagem recebida de {sid}: {mensagem_usuario}")
+        app.logger.info(f"Mensagem recebida de {session.get('session_id', request.sid)}: {mensagem_usuario}")
 
-        # Correção da sintaxe duplicada aqui:
+        # Validação básica: não deixa enviar mensagens vazias
         if not mensagem_usuario:
             emit('erro', {"erro": "Mensagem não pode ser vazia."})
             return
 
-        user_chat = get_user_chat(sid)
+        # Puxa o histórico de conversa desse aluno específico
+        user_chat = get_user_chat()
         if user_chat is None:
             emit('erro', {"erro": "Sessão de chat não pôde ser estabelecida."})
             return
 
-        # Comunicação com o Google Gemini
+        # ==========================================
+        # COMUNICAÇÃO COM O GOOGLE GEMINI
+        # ==========================================
+        # Aqui o nosso servidor repassa a pergunta para a IA do Google...
         resposta_gemini = user_chat.send_message(mensagem_usuario)
 
+        # ... e aqui extraímos apenas o texto da resposta que o Gemini devolveu.
+        # (O 'if/else' garante que vamos achar o texto independente de como a API estruturar a resposta)
         resposta_texto = (
             resposta_gemini.text
             if hasattr(resposta_gemini, 'text')
             else resposta_gemini.candidates[0].content.parts[0].text
         )
         
-        emit('nova_mensagem', {"remetente": "bot", "texto": resposta_texto, "session_id": sid})
-        app.logger.info(f"Resposta enviada para {sid}: {resposta_texto}")
+        # O servidor usa o 'emit' para devolver a resposta final do bot lá para a tela do Front-end.
+        emit('nova_mensagem', {"remetente": "bot", "texto": resposta_texto, "session_id": session.get('session_id')})
+        app.logger.info(f"Resposta enviada para {session.get('session_id', request.sid)}: {resposta_texto}")
 
     except Exception as e:
-        app.logger.error(f"Erro ao processar 'enviar_mensagem' para {sid}: {e}", exc_info=True)
+        app.logger.error(f"Erro ao processar 'enviar_mensagem' para {session.get('session_id', request.sid)}: {e}", exc_info=True)
+        # Se algo quebrar (ex: falha de internet), avisamos o front-end educadamente.
         emit('erro', {"erro": f"Ocorreu um erro no servidor: {str(e)}"})
 
 
 @socketio.on('disconnect')
 def handle_disconnect():
-    sid = request.sid
-    print(f"Cliente desconectado: {sid}")
-    
-    # Limpeza de memória
-    if sid in active_chats:
-        del active_chats[sid]
-        print(f"Memória do chat {sid} liberada com sucesso.")
+    """
+    EVENTO: Disparado quando o usuário fecha a aba do navegador ou perde a conexão.
+    """
+    print(f"Cliente desconectado: {request.sid}, session_id: {session.get('session_id', 'N/A')}")
 
 
+# Inicia o servidor local. A porta padrão do Flask costuma ser a 5000.
 if __name__ == "__main__":
-    socketio.run(app, port=5001, debug=True)
+    socketio.run(app)
