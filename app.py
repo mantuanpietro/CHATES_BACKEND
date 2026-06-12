@@ -1,3 +1,7 @@
+# IMPORTANTE: Patch do gevent DEVE vir PRIMEIRO, antes de qualquer outra importação
+from gevent import monkey
+monkey.patch_all(ssl=False)
+
 from flask import Flask, request, session, jsonify
 from flask_socketio import SocketIO, emit
 from google import genai
